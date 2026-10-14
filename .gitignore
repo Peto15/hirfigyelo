@@ -1,0 +1,5 @@
+beallitasok.env
+allapot.json
+.naptar_cache.json
+*.log
+__pycache__/
