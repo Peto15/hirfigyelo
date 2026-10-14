@@ -54,7 +54,7 @@ NAPTAR_FONTOSSAG = {"High"}      # csak a nagy hatású események
 ESZKOZOK = [
     ("USA Tech 100", "yahoo", "NQ=F", 0.6),
     ("Arany", "yahoo", "GC=F", 0.6),
-    ("Bitcoin", "binance", "BTCUSDT", 1.5),
+    ("Bitcoin", "yahoo", "BTC-USD", 1.5),  # a Binance a GitHub szervereit letiltja (HTTP 451)
 ]
 ARUGRAS_ABLAK_PERC = 15
 ARUGRAS_SZUNET_PERC = 60         # ugyanarra az eszközre ennyi ideig nem szól újra
