@@ -1,0 +1,45 @@
+name: Hírfigyelő
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # negyedóránként indul, egy futás háromszor ellenőriz
+  workflow_dispatch:          # kézi indítás az Actions fülön
+
+concurrency:
+  group: hirfigyelo
+  cancel-in-progress: false
+
+jobs:
+  ellenorzes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Előző állapot visszatöltése
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            allapot.json
+            .naptar_cache.json
+          key: allapot-${{ github.run_id }}
+          restore-keys: allapot-
+
+      - name: Kezdő állapot, ha még nincs
+        run: "[ -f allapot.json ] || cp kezdo_allapot.json allapot.json"
+
+      - name: Ellenőrzés (3 × 5 percenként)
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TZ: Europe/Budapest
+        run: python3 hirfigyelo.py --ciklus 3 5
+
+      - name: Állapot mentése a következő futásnak
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            allapot.json
+            .naptar_cache.json
+          key: allapot-${{ github.run_id }}
