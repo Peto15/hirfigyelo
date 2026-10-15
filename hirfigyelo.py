@@ -1073,6 +1073,37 @@ def helyzetkep_ellenorzes(allapot, t):
         allapot["helyzetkep_datum"] = ma
         allapot["varakozas"] = {"datum": ma, "eszkozok": varakozasok, "kiertekelve": False}
         naplo("Napi helyzetkép elküldve.")
+        if varakozasok and telegram_kuld(javaslat_szoveg(varakozasok, allapot.get("varakozas_stat") or {}, t)):
+            naplo("Napi javaslat elküldve.")
+
+
+def javaslat_szoveg(varakozasok, stat, t):
+    """Rövid, külön üzenet: eszközönként irány, beszállás, stop és cél 21:00-ig (a várható sáv széleivel)."""
+    sorok = []
+    for nev, _, _, kulcs in HELYZETKEP_ESZKOZOK:
+        e = varakozasok.get(kulcs)
+        if not e:
+            continue
+        osszeg = sum(e["reszek"].values())
+        jo, db = stat.get(kulcs, [0, 0])[:2]
+        meres = f"eddig {jo}/{db} ({jo / db:.0%})" if db else "még nincs mért találat"
+        if not e["irany"]:
+            sorok.append(f"➡️ <b>{nev}: ma nincs javaslat</b> – a jelek ellentmondanak egymásnak, kimaradni is döntés.\n"
+                         f"   Várható sáv {VARAKOZAS_VEGE}-ig: {szam(e['also'])} – {szam(e['felso'])}")
+            continue
+        vetel = e["irany"] > 0
+        stop, cel = (e["also"], e["felso"]) if vetel else (e["felso"], e["also"])
+        kockazat, nyereseg = abs(e["ar"] - stop), abs(cel - e["ar"])
+        erosseg = "erősebb jel" if abs(osszeg) >= 2 else "gyenge jel"
+        sorok.append(f"{'🟢' if vetel else '🔴'} <b>{nev}: {'VÉTEL (long)' if vetel else 'ELADÁS (short)'}</b> – {erosseg}, {meres}\n"
+                     f"   Beszállás ~{szam(e['ar'])} · Stop {szam(stop)} ({szam(kockazat)} pont) · "
+                     f"Cél {szam(cel)} ({szam(nyereseg)} pont) · Kiszállás legkésőbb {VARAKOZAS_VEGE}\n"
+                     f"   Kockázat:nyereség = 1:{nyereseg / kockazat:.1f}; pozícióméret = a kockázatod (pl. a számla 1%-a) ÷ {szam(kockazat)} pont")
+    return (f"🎯 <b>Mai javaslat ({t:%m.%d.} {t:%H:%M} – {VARAKOZAS_VEGE})</b>\n\n" + "\n\n".join(sorok)
+            + f"\n\n<i>A stop és a cél a várható sáv széle (a múltban kb. 70%-ban nem lépett ki belőle). Az ár ~10 percet késik és "
+              f"a határidős piacról jön, a Trading 212-ben a pontos számok eltérhetnek: a pont-távolságokat használd. "
+              f"Szabályalapú gyakorló javaslat, nem befektetési tanács; amíg az „eddig” arány hetek alatt sem megy "
+              f"55–60% fölé, csak gyakorló (demó) számlán kövesd. {VARAKOZAS_VEGE} után jön az eredmény.</i>")
 
 
 def varakozas_ellenorzes(allapot, t):
@@ -1102,23 +1133,42 @@ def varakozas_ellenorzes(allapot, t):
         sav_jo = e["also"] <= mely and csucs <= e["felso"]
         s[2] += sav_jo
         s[3] += 1
+        kotes = ""
         if e["irany"]:
             irany_jo = valt * e["irany"] > 0
             s[0] += irany_jo
             s[1] += 1
             irany_szoveg = f"irány {'↑' if e['irany'] > 0 else '↓'} {'✅ bejött' if irany_jo else '❌ nem jött be'}"
+            # a javasolt kötés: melyiket érte el előbb, a stopot vagy a célt (egy gyertyán belül mindkettő: stop)
+            vetel = e["irany"] > 0
+            stop, cel = (e["also"], e["felso"]) if vetel else (e["felso"], e["also"])
+            kimenet, eredmeny = f"{VARAKOZAS_VEGE}-kor zárva", valt * e["irany"]
+            for g in gy:
+                if (g[3] <= stop) if vetel else (g[2] >= stop):
+                    kimenet, eredmeny = f"stop {datetime.fromtimestamp(g[0], HELYI_IDO):%H:%M}-kor", -abs(e["ar"] - stop)
+                    break
+                if (g[2] >= cel) if vetel else (g[3] <= cel):
+                    kimenet, eredmeny = f"cél {datetime.fromtimestamp(g[0], HELYI_IDO):%H:%M}-kor", abs(cel - e["ar"])
+                    break
+            r = eredmeny / abs(e["ar"] - stop)
+            while len(s) < 6:
+                s.append(0)
+            s[4] += r
+            s[5] += 1
+            kotes = (f"\n   kötés: {kimenet}, {'+' if eredmeny >= 0 else '−'}{szam(abs(eredmeny))} pont ({r:+.1f} R); "
+                     f"eddig összesen {s[4]:+.1f} R {s[5]} kötésből")
         else:
             irany_jo, irany_szoveg = None, "irány → (semleges, nem számít)"
         naplo_lista.append([v["datum"], kulcs, e["irany"], round(valt / e["ar"] * 100, 3), sav_jo, e["reszek"]])
         sorok.append(f"<b>{nev}</b>: {szam(e['ar'])} → {szam(zaro)} ({valt / e['ar'] * 100:+.2f}%); {irany_szoveg}; "
                      f"sáv {szam(e['also'])}–{szam(e['felso'])} {'✅ benne maradt' if sav_jo else '❌ kilépett'} "
-                     f"(csúcs {szam(csucs)}, mélypont {szam(mely)})\n"
+                     f"(csúcs {szam(csucs)}, mélypont {szam(mely)}){kotes}\n"
                      f"   eddig: irány {s[0]}/{s[1]}{f' ({s[0] / s[1]:.0%})' if s[1] else ''}, sáv {s[2]}/{s[3]} ({s[2] / s[3]:.0%})")
     allapot["varakozas_naplo"] = naplo_lista[-300:]
     v["kiertekelve"] = True
-    if sorok and telegram_kuld(f"🧾 <b>Bejött-e a mai várakozás? ({t:%m.%d.}, {VARAKOZAS_VEGE})</b>\n\n" + "\n\n".join(sorok)
-                               + "\n\n<i>Ha az irány hetek alatt sem megy tartósan 55–60% fölé, nem érdemes rá kereskedni; "
-                                 "a sáv a stop és a cél kijelöléséhez hasznos.</i>"):
+    if sorok and telegram_kuld(f"🧾 <b>Bejött-e a mai javaslat? ({t:%m.%d.}, {VARAKOZAS_VEGE})</b>\n\n" + "\n\n".join(sorok)
+                               + "\n\n<i>R = a kockázat egysége: +1 R = annyit nyertél, amennyit kockáztattál (1%-os kockázatnál a számla 1%-a). "
+                                 "Ha az összes R hetek alatt sem megy tartósan pluszba, nem érdemes rá kereskedni.</i>"):
         naplo("Várakozás kiértékelve és elküldve.")
 
 
