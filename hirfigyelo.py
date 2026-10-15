@@ -8,7 +8,10 @@ Háromféle értesítést küld:
   2. Friss hírek: nagy hírforrások (Reuters, Bloomberg, CNBC stb.) címei
      kulcsszavakra szűrve.
   3. Nagy árugrás: ha valamelyik eszköz 15 perc alatt szokatlanul nagyot mozdul.
-  4. Napi helyzetkép (hétköznap 16:00, napon belüli kereskedéshez): szintek, hátralévő mozgás, scalping-stop, irány.
+  4. Napi helyzetkép (hétköznap 16:00, napon belüli kereskedéshez): szintek, hátralévő mozgás, scalping-stop, irány,
+     dollárindex és 10 éves hozam, Bitcoin-ETF pénzáramlás (hírcímekből), mai gyorsjelentések.
+  A reggeli összefoglalóban a Fed-tagok beszédei és a nagy techcégek gyorsjelentései is benne vannak;
+  a zárás utáni gyorsjelentések előtt 15 perccel figyelmeztetés jön.
 
 Futtatás:
   python3 hirfigyelo.py              egy ellenőrzés (ezt hívja 5 percenként a Mac)
@@ -60,7 +63,9 @@ ARUGRAS_ABLAK_PERC = 15
 ARUGRAS_SZUNET_PERC = 60         # ugyanarra az eszközre ennyi ideig nem szól újra
 
 HELYZETKEP_IDO = "16:00"         # napi helyzetkép (hétköznap), amikor a nyitó sáv (15:30–16:00) kész
-US_NYITAS = "15:30"              # az amerikai tőzsde nyitása magyar idő szerint
+US_IDO = ZoneInfo("America/New_York")
+US_NYITAS = "09:30"              # az amerikai tőzsde nyitása New York-i idő szerint (magyar idő: 15:30, az
+US_ZARAS = "16:00"               # óraátállítások közti 1-2 hétben 14:30); zárás magyar idő szerint 22:00 / 21:00
 HELYZETKEP_VEGE = "18:00"        # ha a gép aludt, eddig még elküldi
 KERESKEDESI_SAV = ("16:00", "18:00")  # ebben a sávban méri a félórás mozgást
 # (név, Yahoo napi jel, Yahoo 5 perces jel, hírhangulat kulcsa)
@@ -69,8 +74,24 @@ HELYZETKEP_ESZKOZOK = [
     ("Arany", "GC=F", "GC=F", "arany"),
     ("Bitcoin", "BTC-USD", "BTC-USD", "btc"),
 ]
+# Háttér a helyzetképben: (név, Yahoo jel, mértékegység)
+HATTER_JELEK = [
+    ("Dollárindex (DXY)", "DX-Y.NYB", ""),
+    ("10 éves USA-hozam", "^TNX", "%"),
+]
+
+# Gyorsjelentések: a USA Tech 100 legnagyobb cégei (Nasdaq-naptár). A *-osok súlya a legnagyobb.
+NAGY_TECH = {
+    "NVDA": "NVIDIA*", "AAPL": "Apple*", "MSFT": "Microsoft*", "AMZN": "Amazon*", "GOOGL": "Alphabet (Google)*",
+    "META": "Meta*", "AVGO": "Broadcom*", "TSLA": "Tesla*", "NFLX": "Netflix", "COST": "Costco", "AMD": "AMD",
+    "PLTR": "Palantir", "ASML": "ASML", "CSCO": "Cisco", "TMUS": "T-Mobile US", "MU": "Micron",
+    "INTC": "Intel", "QCOM": "Qualcomm", "ADBE": "Adobe", "AMAT": "Applied Materials", "LRCX": "Lam Research",
+    "TXN": "Texas Instruments",
+}
+JELENTES_FIGYELMEZTETES = True   # a zárás utáni jelentések előtt 15 perccel szól
 
 # Hírek: Google Hírek keresések, megbízható forrásokra és erős szavakra szűrve
+_CEGEK = "Nvidia OR Apple OR Microsoft OR Amazon OR Alphabet OR Google OR Meta OR Broadcom OR Tesla OR Netflix"
 HIR_KERESESEK = [
     '"Federal Reserve" OR Fed OR "rate cut" OR "rate hike" OR Warsh',
     'tariff OR tariffs OR sanctions OR "trade war"',
@@ -78,6 +99,8 @@ HIR_KERESESEK = [
     'Nasdaq OR "stock market" OR "Wall Street"',
     'gold price',
     'war OR missile OR invasion OR "military strike"',
+    f'({_CEGEK}) (earnings OR results OR guidance OR revenue)',
+    'bitcoin ETF (inflows OR outflows)',
 ]
 MEGBIZHATO_FORRASOK = [
     "Reuters", "Bloomberg", "CNBC", "Wall Street Journal", "WSJ",
@@ -93,6 +116,11 @@ EROS_SZAVAK = [
     "sec", "etfs?", "halt(ed|s)?", "recession",
 ]
 EROS_MINTA = re.compile(r"\b(" + "|".join(EROS_SZAVAK) + r")\b", re.IGNORECASE)
+# Nagy techcég gyorsjelentéséről szóló cím (ez is átmegy a szűrőn)
+_CEG_MINTA = r"(nvidia|apple|microsoft|amazon|alphabet|google|meta|broadcom|tesla|netflix)"
+_JEL_SZO = r"(earnings|results|quarter\w*|guidance|outlook|revenue|profit|beats?|miss(es)?|forecasts?)"
+JELENTES_MINTA = re.compile(rf"\b{_CEG_MINTA}\b.{{0,80}}\b{_JEL_SZO}\b|\b{_JEL_SZO}\b.{{0,80}}\b{_CEG_MINTA}\b",
+                            re.IGNORECASE)
 HIR_MAX_ORANKENT = 4
 HIR_MAX_KOR_PERC = 30            # ennél régebbi hírről már nem szól
 
@@ -135,6 +163,12 @@ IRANY_SZABALYOK = [
      "Erős munkaerőpiac: kisebb az esélye a kamatcsökkentésnek."),
     ("munka", r"(jobs?|payrolls?|hiring|employment).{0,30}(miss\w*|weak\w*|slow\w*|fall\w*|drop\w*)|unemployment.{0,20}ris\w*", {"arany": 1, "btc": 1},
      "Gyengülő munkaerőpiac: nő a kamatcsökkentés esélye."),
+    ("jelentes", r"(miss\w*|fall\w* short|below|disappoint\w*).{0,30}(estimates|expectations|forecasts?)"
+                 r"|(cuts?|lowers?|weak\w*|disappoint\w*|soft\w*|tepid) (guidance|outlook|forecast)", {"nq": -1},
+     "Gyengébb gyorsjelentés vagy kilátás a vártnál: a nagy techcégek lefelé húzhatják a USA Tech 100-at."),
+    ("jelentes", r"(beat\w*|top\w*|exceed\w*|surpass\w*|crush\w*).{0,30}(estimates|expectations|forecasts?)"
+                 r"|(raises?|boosts?|lifts?|strong\w*|upbeat|rosy) (guidance|outlook|forecast)", {"nq": 1},
+     "Jobb gyorsjelentés vagy kilátás a vártnál: a nagy techcégek felfelé húzhatják a USA Tech 100-at."),
     ("reszveny", rf"(stocks?|nasdaq|wall street|equities|tech shares|s&p).{{0,40}}{_LE}|sell-?off.{{0,30}}(stocks?|tech|nasdaq)", {"nq": -1},
      "A részvénypiac már esik."),
     ("reszveny", rf"(stocks?|nasdaq|wall street|equities|tech shares|s&p).{{0,40}}{_FEL}", {"nq": 1},
@@ -164,6 +198,8 @@ ESEMENY_NEVEK = [
     ("FOMC Press Conference", "Fed sajtótájékoztató"),
     ("FOMC Meeting Minutes", "Fed-ülés jegyzőkönyve"),
     ("Fed Chair", "A Fed elnökének beszéde"),
+    ("FOMC Member", "Fed-tag beszéde"),
+    ("Fed Vice Chair", "A Fed alelnökének beszéde"),
     ("Core Retail Sales", "Kiskereskedelmi forgalom (autók nélkül)"),
     ("Retail Sales", "Kiskereskedelmi forgalom"),
     ("GDP", "GDP (gazdasági növekedés)"),
@@ -243,6 +279,12 @@ def csendes_e(t):
     perc = t.hour * 60 + t.minute
     kezd, vege = ora_perc(CSENDES_IDO[0]), ora_perc(CSENDES_IDO[1])
     return perc >= kezd or perc < vege if kezd > vege else kezd <= perc < vege
+
+
+def us_idopont(t, ny_ido):
+    """Egy New York-i időpont (pl. a nyitás) a `t` napján, magyar időben."""
+    o, p = (int(x) for x in ny_ido.split(":"))
+    return datetime(t.year, t.month, t.day, o, p, tzinfo=US_IDO).astimezone(HELYI_IDO)
 
 
 def html(szoveg):
@@ -358,9 +400,62 @@ def esemeny_sor(e):
     return sor
 
 
+def fed_beszedek(t):
+    """A mai Fed-beszédek, a kis fontosságúak is (a nagyokat a fontos események már tartalmazzák)."""
+    beszedek = []
+    for e in naptar_esemenyek():
+        cim = e.get("title", "")
+        if (e.get("country") != "USD" or e.get("impact") in NAPTAR_FONTOSSAG
+                or not re.search(r"\b(FOMC Member|Fed Vice Chair|Fed Chair\w*)\b.*Speaks", cim)):
+            continue
+        try:
+            ido = datetime.fromisoformat(e["date"]).astimezone(HELYI_IDO)
+        except (KeyError, ValueError):
+            continue
+        if ido.date() == t.date():
+            beszedek.append((ido, re.sub(r"^(FOMC Member|Fed Vice Chair\w*|Fed Chair\w*) | Speaks$", "", cim)))
+    return sorted(beszedek)
+
+
+def gyorsjelentesek(allapot, t):
+    """A nagy techcégek mai gyorsjelentései a Nasdaq naptárából: [(időszak, név, várt EPS)].
+    Naponta legfeljebb 6 óránként töltjük le, az állapotban tároljuk."""
+    ma = t.date().isoformat()
+    cache = allapot.setdefault("jelentes_cache", {})
+    tarolt = cache.get(ma)
+    if not tarolt or t.timestamp() - tarolt["ido"] > 6 * 3600:
+        try:
+            adat = json.loads(letolt(f"https://api.nasdaq.com/api/calendar/earnings?date={ma}"))
+            sorok = (adat.get("data") or {}).get("rows") or []
+            lista = [[{"time-pre-market": "elotte", "time-after-hours": "utana"}.get(r.get("time"), "?"),
+                      NAGY_TECH[r["symbol"]], r.get("epsForecast") or ""]
+                     for r in sorok if r.get("symbol") in NAGY_TECH]
+            tarolt = cache[ma] = {"ido": t.timestamp(), "lista": lista}
+            for regi in sorted(cache)[:-3]:
+                del cache[regi]
+        except Exception as e:
+            naplo(f"Gyorsjelentés-naptár hiba: {e}")
+            return tarolt["lista"] if tarolt else []
+    return tarolt["lista"]
+
+
+def jelentes_sorok(jelentesek, t):
+    zaras = us_idopont(t, US_ZARAS)
+    nevek = {"elotte": f"nyitás előtt (még {us_idopont(t, US_NYITAS):%H:%M} előtt)",
+             "utana": f"zárás után (~{zaras:%H:%M}–{zaras + timedelta(minutes=10):%H:%M})",
+             "?": "időpont nem ismert"}
+    sorok = []
+    for idoszak in ("elotte", "utana", "?"):
+        cegek = [f"{html(n.rstrip('*'))}{' ⭐' if n.endswith('*') else ''}" for i, n, _ in jelentesek if i == idoszak]
+        if cegek:
+            sorok.append(f"• {nevek[idoszak]}: {', '.join(cegek)}")
+    return sorok
+
+
 def naptar_ellenorzes(allapot, t):
     esemenyek = fontos_esemenyek()
     kuldott = allapot.setdefault("naptar_kuldott", [])
+    jelentesek = gyorsjelentesek(allapot, t) if t.weekday() < 5 else []
 
     # Reggeli összefoglaló
     ma = t.date().isoformat()
@@ -373,9 +468,29 @@ def naptar_ellenorzes(allapot, t):
             szoveg += "\nEkkor nagy ugrás jöhet. Nyitott pozíciónál figyelj a stop-lossra, előtte pár perccel ne nyiss újat."
         else:
             szoveg = f"📅 Ma ({t:%m.%d.}) nincs nagy hatású amerikai adat a naptárban."
+        beszedek = fed_beszedek(t)
+        if beszedek:
+            szoveg += ("\n\n🎙 <b>Fed-tagok beszédei:</b> " + ", ".join(f"{i:%H:%M} {html(n)}" for i, n in beszedek)
+                       + "\n<i>Egyenként kisebb hatásúak, de egy kamatra utaló mondat megmozgathatja az árakat.</i>")
+        if jelentesek:
+            szoveg += ("\n\n💼 <b>Gyorsjelentések (USA Tech 100 nagy cégei):</b>\n" + "\n".join(jelentes_sorok(jelentesek, t))
+                       + "\n<i>⭐ = nagy súly az indexben; a jelentés után az index percek alatt nagyot ugorhat.</i>")
         if telegram_kuld(szoveg):
             allapot["reggeli_datum"] = ma
             naplo("Reggeli összefoglaló elküldve.")
+
+    # Zárás utáni gyorsjelentések előtt (az esti kereskedési sávba esik)
+    utana = [n.rstrip("*") for i, n, _ in jelentesek if i == "utana"]
+    zaras = us_idopont(t, US_ZARAS)
+    hatra = (zaras - t).total_seconds() / 60
+    kulcs = "jelentes-" + zaras.isoformat()
+    if JELENTES_FIGYELMEZTETES and utana and 0 < hatra <= FIGYELMEZTETES_PERC + 10 and kulcs not in kuldott and not csendes_e(t):
+        szoveg = (f"💼 <b>{round(hatra)} perc múlva ({zaras:%H:%M}) zár az amerikai tőzsde, utána gyorsjelentés jön:</b>\n"
+                  f"{html(', '.join(utana))}\n\nA USA Tech 100 {zaras:%H:%M} után pár perc alatt nagyot ugorhat, "
+                  "mindkét irányba. Nyitott pozíciónál figyelj a stop-lossra; a stop ilyenkor rosszabb áron is teljesülhet.")
+        if telegram_kuld(szoveg):
+            kuldott.append(kulcs)
+            naplo(f"Gyorsjelentés-figyelmeztetés elküldve: {', '.join(utana)}")
 
     # Figyelmeztetés közvetlenül előtte (csendes időben nem, a reggeli lista úgyis tartalmazza)
     for ido, csoport in csoportosit(esemenyek):
@@ -549,11 +664,42 @@ def hir_uzenet(h):
     return szoveg, irany
 
 
+_OSSZEG = r"\$\s?([\d.,]+)\s*(million|billion|bn|m|b)\b"
+ETF_MINTAK = [  # (minta, az összeg csoportja, irány: None = a szóból)
+    (re.compile(_OSSZEG + r"[^$]{0,25}?\b(inflows?|outflows?)\b", re.I), 1, None),
+    (re.compile(r"\b(inflows?|outflows?)\b[^$]{0,15}" + _OSSZEG, re.I), 2, None),
+    (re.compile(r"\b(shed|lost|lose|bleed|pull|withdr[ae]w)\w*\s+(about\s+)?" + _OSSZEG, re.I), 3, -1),
+    (re.compile(r"\b(draw|attract|took in|add|pull in|gain)\w*\s+(about\s+)?" + _OSSZEG, re.I), 3, 1),
+]
+
+
+def etf_aramlas(cim):
+    """Egy Bitcoin-ETF-es címből a napi pénzáramlás millió dollárban (kiáramlás negatív), vagy None."""
+    if not (re.search(r"\b(bitcoin|btc)\b", cim, re.I) and re.search(r"\bETFs?\b", cim)):
+        return None
+    if re.search(r"\b(ether\w*|eth|xrp|solana|sol|altcoins?)\b", cim, re.I):
+        return None  # vegyes (több kriptós) adat, nem tiszta Bitcoin-szám
+    for minta, csop, elojel in ETF_MINTAK:
+        m = minta.search(cim)
+        if not m:
+            continue
+        g = m.groups()
+        ertek = float(g[csop - 1].replace(",", ""))
+        if g[csop].lower() in ("billion", "bn", "b"):
+            ertek *= 1000
+        if elojel is None:
+            szo = g[0] if csop == 2 else g[2]
+            elojel = -1 if szo.lower().startswith("out") else 1
+        return elojel * ertek
+    return None
+
+
 def hirek_ellenorzes(allapot, t):
     latott = set(allapot.get("hirek_latott", []))
     elso_futas = not latott
     kuldesek = [x for x in allapot.get("hir_kuldesek", []) if t.timestamp() - x < 3600]
     jeloltek = []
+    etf = [x for x in allapot.get("etf_hirek", []) if t.timestamp() - x[0] < 48 * 3600]
 
     forrasok = [(f"{nev} csatorna", lambda u=url, n=nev: rss_elemek(u, n)) for nev, url in OLVASHATO_CSATORNAK]
     forrasok += [(k[:30], lambda k=k: google_hirek(k)) for k in HIR_KERESESEK]
@@ -564,12 +710,15 @@ def hirek_ellenorzes(allapot, t):
                 if kulcs in latott:
                     continue
                 latott.add(kulcs)
+                aramlas = etf_aramlas(h["cim"])
+                if aramlas is not None:  # bármelyik forrásból, a helyzetképhez
+                    etf.append([h["ido"].timestamp(), aramlas, h["forras"], h["cim"]])
                 kor = (t - h["ido"]).total_seconds() / 60
                 if elso_futas or kor > HIR_MAX_KOR_PERC:
                     continue
                 if not any(f.lower() in h["forras"].lower() for f in MEGBIZHATO_FORRASOK):
                     continue
-                if not EROS_MINTA.search(h["cim"] + " " + h["leiras"]):
+                if not (EROS_MINTA.search(h["cim"] + " " + h["leiras"]) or JELENTES_MINTA.search(h["cim"])):
                     continue
                 if any(f.lower() in h["forras"].lower() for f in OLVASHATO_FORRASOK):
                     h["olvashato"] = h["olvashato"] or not h["link"].startswith("https://news.google.com")
@@ -590,6 +739,7 @@ def hirek_ellenorzes(allapot, t):
         hangulat.append([h["ido"].timestamp()] + [0 if irany[e] is None else (irany[e] > 0) - (irany[e] < 0)
                                                   for e in ("nq", "arany", "btc")])
     allapot["hir_hangulat"] = hangulat
+    allapot["etf_hirek"] = sorted(etf)[-30:]
 
     allapot["hirek_latott"] = list(latott)[-3000:]
     allapot["hir_kuldesek"] = kuldesek
@@ -690,7 +840,8 @@ def napon_beluli(jel, t):
     """5 perces adatokból: a mai nap szintjei és a 16–18 órás sáv szokásos mozgása (1 hónap)."""
     gyertyak = yahoo_gyertyak(jel, "5m", "1mo")
     kezd, vege = (ora_perc(x) for x in KERESKEDESI_SAV)
-    nyitas = ora_perc(US_NYITAS)
+    ny = us_idopont(t, US_NYITAS)
+    nyitas = ny.hour * 60 + ny.minute
     ma, felorak, otperc = [], {}, []
     for ts, o, h, l, c in gyertyak:
         ido, perc = perc_napbol(ts)
@@ -709,6 +860,7 @@ def napon_beluli(jel, t):
         "nyito": (max(x[1] for x in nyito), min(x[2] for x in nyito)) if len(nyito) >= 4 else None,
         "ejjel": (max(x[1] for x in ejjel), min(x[2] for x in ejjel)) if ejjel else None,
         "ma": (max(x[1] for x in ma), min(x[2] for x in ma)) if ma else None,
+        "nyitas": ny,
     }
 
 
@@ -750,7 +902,8 @@ def eszkoz_helyzet(nev, napi_jel, perces_jel, kulcs, hangulat, t):
         nb = {}
     szintek = []
     if nb.get("nyito"):
-        szintek.append(f"nyitó sáv (15:30–16:00) {szam(nb['nyito'][1])} – {szam(nb['nyito'][0])}")
+        ny = nb["nyitas"]
+        szintek.append(f"nyitó sáv ({ny:%H:%M}–{ny + timedelta(minutes=30):%H:%M}) {szam(nb['nyito'][1])} – {szam(nb['nyito'][0])}")
     szintek.append(f"tegnap csúcs {szam(tegnap[2])}, mélypont {szam(tegnap[3])}, záró {szam(tegnap[4])}")
     if nb.get("ejjel"):
         szintek.append(f"éjszaka/délelőtt {szam(nb['ejjel'][1])} – {szam(nb['ejjel'][0])}")
@@ -768,12 +921,59 @@ def eszkoz_helyzet(nev, napi_jel, perces_jel, kulcs, hangulat, t):
     return "\n".join(sorok), talalat
 
 
+def hatter_sor():
+    """A dollárindex és a 10 éves hozam változása a tegnapi zárához képest, rövid értelmezéssel."""
+    reszek, jelek = [], []
+    for nev, jel, egyseg in HATTER_JELEK:
+        try:
+            gy = yahoo_gyertyak(jel, "1d", "5d")
+        except Exception as e:
+            naplo(f"Háttéradat hiba ({nev}): {e}")
+            continue
+        if len(gy) < 2:
+            continue
+        elozo, most_ = gy[-2][4], gy[-1][4]
+        if egyseg == "%":  # hozam: bázispontban (0,01 százalékpont)
+            bp = (most_ - elozo) * 100
+            reszek.append(f"{nev} {most_:.2f}% ({bp:+.0f} bp)")
+            jelek.append((bp >= 3) - (bp <= -3))
+        else:
+            v = (most_ / elozo - 1) * 100
+            reszek.append(f"{nev} {most_:.2f} ({v:+.2f}%)")
+            jelek.append((v >= 0.2) - (v <= -0.2))
+    if not reszek:
+        return None
+    osszeg = sum(jelek)
+    if osszeg > 0:
+        ertelmezes = "erősödő dollár / emelkedő hozam: ez nyomja az aranyat és a USA Tech 100-at (a Bitcoint is)."
+    elif osszeg < 0:
+        ertelmezes = "gyengülő dollár / csökkenő hozam: ez általában segíti az aranyat és a USA Tech 100-at."
+    else:
+        ertelmezes = "nincs nagy elmozdulás, ma nem ez mozgatja a piacot."
+    return f"🌐 <b>Háttér:</b> {' · '.join(reszek)}\n→ {ertelmezes}"
+
+
+def etf_sor(allapot, t):
+    """A legfrissebb Bitcoin-ETF pénzáramlás a hírekből (az elmúlt 36 órából)."""
+    friss = [x for x in allapot.get("etf_hirek", []) if t.timestamp() - x[0] < 36 * 3600]
+    if not friss:
+        return None
+    ido, ertek, forras, _ = max(friss)
+    osszeg = f"{abs(ertek) / 1000:.2f} milliárd $" if abs(ertek) >= 1000 else f"{abs(ertek):.0f} millió $"
+    szo, hatas = (("beáramlás", "a vásárlás felfelé támogatja") if ertek > 0
+                  else ("kiáramlás", "az eladás lefelé nyomja"))
+    return (f"<b>ETF-ek:</b> nettó {szo} {osszeg} ({html(forras)}, {datetime.fromtimestamp(ido, HELYI_IDO):%m.%d. %H:%M}) "
+            f"– {hatas} a Bitcoint. <i>Hírcímből, az előző kereskedési napra.</i>")
+
+
 def helyzetkep_szoveg(allapot, t):
     hangulat = allapot.get("hir_hangulat", [])
     reszek, talalatok = [], []
     for nev, napi_jel, perces_jel, kulcs in HELYZETKEP_ESZKOZOK:
         try:
             szoveg, talalat = eszkoz_helyzet(nev, napi_jel, perces_jel, kulcs, hangulat, t)
+            if kulcs == "btc" and etf_sor(allapot, t):
+                szoveg += "\n" + etf_sor(allapot, t)
             reszek.append(szoveg)
             if talalat:
                 talalatok.append(f"{nev} {talalat:.0%}")
@@ -782,10 +982,17 @@ def helyzetkep_szoveg(allapot, t):
     if not reszek:
         return None
     maiak = [e for e in fontos_esemenyek() if e["ido"].date() == t.date()]
-    esemeny = ("Mai nagy adatok: " + ", ".join(f"{ido:%H:%M} {magyar_nev(cs[0]['title'])}" for ido, cs in csoportosit(maiak))
+    esemeny = ("Mai nagy adatok: " + ", ".join(f"{ido:%H:%M} {magyar_nev(cs[0]['title'])}" for ido, cs in csoportosit(maiak)) + "."
                if maiak else "Ma nincs nagy amerikai adat a naptárban.")
+    beszedek = [(i, n) for i, n in fed_beszedek(t) if i >= t]
+    if beszedek:
+        esemeny += " Fed-beszédek még ma: " + ", ".join(f"{i:%H:%M} {n}" for i, n in beszedek) + "."
+    hatter = hatter_sor()
+    jelentesek = gyorsjelentesek(allapot, t)
+    jelentes = ("\n\n💼 <b>Mai gyorsjelentések:</b>\n" + "\n".join(jelentes_sorok(jelentesek, t))) if jelentesek else ""
     return (f"🧭 <b>Napi helyzetkép ({t:%m.%d. %H:%M})</b>\n\n" + "\n\n".join(reszek)
-            + f"\n\n📅 {html(esemeny)}\n\n"
+            + (f"\n\n{hatter}" if hatter else "")
+            + f"\n\n📅 {html(esemeny)}" + jelentes + "\n\n"
             "<i>Az árak a határidős piacról jönnek (a Bitcoin kivételével); a Trading 212 ára ettől pár tíz ponttal eltérhet, "
             "ezért a távolságokat (pontokat) figyeld, ne a pontos számokat. "
             "A nyitó sáv szélét 16–18 óra között szinte minden nap áttöri az ár, gyakran mindkét irányba (hamis kitörés). "
