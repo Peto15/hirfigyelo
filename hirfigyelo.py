@@ -8,7 +8,8 @@ Háromféle értesítést küld:
   2. Friss hírek: nagy hírforrások (Reuters, Bloomberg, CNBC stb.) címei
      kulcsszavakra szűrve.
   3. Nagy árugrás: ha valamelyik eszköz 15 perc alatt szokatlanul nagyot mozdul.
-  4. Napi helyzetkép (hétköznap 16:00, napon belüli kereskedéshez): szintek, hátralévő mozgás, scalping-stop, irány,
+  4. Napi helyzetkép (hétköznap 16:00, napon belüli kereskedéshez): szintek, hátralévő mozgás, scalping-stop,
+     várható sáv és irány 21:00-ig (21:15 után a bot kiértékeli, bejött-e, és számolja a találati arányt),
      dollárindex és 10 éves hozam, Bitcoin-ETF pénzáramlás (hírcímekből), mai gyorsjelentések.
   A reggeli összefoglalóban a Fed-tagok beszédei és a nagy techcégek gyorsjelentései is benne vannak;
   a zárás utáni gyorsjelentések előtt 15 perccel figyelmeztetés jön.
@@ -68,6 +69,9 @@ US_NYITAS = "09:30"              # az amerikai tőzsde nyitása New York-i idő 
 US_ZARAS = "16:00"               # óraátállítások közti 1-2 hétben 14:30); zárás magyar idő szerint 22:00 / 21:00
 HELYZETKEP_VEGE = "18:00"        # ha a gép aludt, eddig még elküldi
 KERESKEDESI_SAV = ("16:00", "18:00")  # ebben a sávban méri a félórás mozgást
+VARAKOZAS_VEGE = "21:00"         # a napvégi várakozás eddig szól; utána a bot kiértékeli
+VARAKOZAS_SAV_ARANY = 0.70       # a várható sávot úgy méretezi, hogy a múltban ennyi napon belül maradjon
+KIERTEKELES_KESES_PERC = 15      # a Yahoo kb. 10 percet késik, ezért 21:15 után értékel
 # (név, Yahoo napi jel, Yahoo 5 perces jel, hírhangulat kulcsa)
 HELYZETKEP_ESZKOZOK = [
     ("USA Tech 100", "NQ=F", "NQ=F", "nq"),
@@ -837,21 +841,40 @@ def median(x):
 
 
 def napon_beluli(jel, t):
-    """5 perces adatokból: a mai nap szintjei és a 16–18 órás sáv szokásos mozgása (1 hónap)."""
-    gyertyak = yahoo_gyertyak(jel, "5m", "1mo")
+    """5 perces adatokból: a mai nap szintjei, a 16–18 órás sáv szokásos mozgása és a várható sáv
+    21:00-ig (60 nap)."""
+    gyertyak = yahoo_gyertyak(jel, "5m", "60d")
     kezd, vege = (ora_perc(x) for x in KERESKEDESI_SAV)
     ny = us_idopont(t, US_NYITAS)
     nyitas = ny.hour * 60 + ny.minute
-    ma, felorak, otperc = [], {}, []
+    ma, felorak, otperc, napok = [], {}, [], {}
+    alap_perc, vege_perc = (t.hour * 60 + t.minute) // 5 * 5, ora_perc(VARAKOZAS_VEGE)
     for ts, o, h, l, c in gyertyak:
         ido, perc = perc_napbol(ts)
         if ido.date() == t.date():
             ma.append((perc, h, l, c))
+            utolso_ts = ts
+        elif ido.weekday() < 5:  # a régebbi napok mozgása a mostani időponttól 21:00-ig
+            n = napok.setdefault(ido.date(), {"fel": [], "le": []})
+            if perc < alap_perc:
+                n["alap"] = c
+            elif perc < vege_perc and "alap" in n:
+                n["fel"].append(h - n["alap"])
+                n["le"].append(n["alap"] - l)
         if kezd <= perc < vege:
             otperc.append(h - l)
             kulcs = (ido.date(), perc // 30)
             fh, fl = felorak.get(kulcs, (h, l))
             felorak[kulcs] = (max(fh, h), min(fl, l))
+    kileng = [(max(n["fel"]), max(n["le"])) for n in napok.values() if len(n["fel"]) >= 6]
+    sav = None
+    if len(kileng) >= 15 and ma:
+        mf, ml = median([max(f, 0) for f, _ in kileng]), median([max(x, 0) for _, x in kileng])
+        for k in [x / 20 for x in range(10, 81)]:  # a legkisebb szorzó, amellyel a napok 70%-a belefér
+            bent = sum(f <= k * mf and x <= k * ml for f, x in kileng) / len(kileng)
+            if bent >= VARAKOZAS_SAV_ARANY:
+                break
+        sav = (ma[-1][3] - k * ml, ma[-1][3] + k * mf, bent, len(kileng))
     nyito = [x for x in ma if nyitas <= x[0] < nyitas + 30]
     ejjel = [x for x in ma if x[0] < nyitas]
     return {
@@ -861,6 +884,10 @@ def napon_beluli(jel, t):
         "ejjel": (max(x[1] for x in ejjel), min(x[2] for x in ejjel)) if ejjel else None,
         "ma": (max(x[1] for x in ma), min(x[2] for x in ma)) if ma else None,
         "nyitas": ny,
+        "sav": sav,                                  # (alsó, felső, a múltban hány %-ban fért bele, napok)
+        "ar": ma[-1][3] if ma else None,             # a legutóbbi 5 perces záróár
+        "ar_ts": utolso_ts if ma else None,          # és a gyertya kezdete (a Yahoo ~10 percet késik)
+        "reggel": next((x[3] for x in ma if x[0] >= 9 * 60), None),  # 9:00 körüli ár
     }
 
 
@@ -868,7 +895,7 @@ def szam(x):
     return f"{x:,.0f}".replace(",", " ") if x >= 100 else f"{x:.1f}"
 
 
-def eszkoz_helyzet(nev, napi_jel, perces_jel, kulcs, hangulat, t):
+def eszkoz_helyzet(nev, napi_jel, perces_jel, kulcs, hangulat, t, dollar=0, stat=None):
     gyertyak = yahoo_gyertyak(napi_jel, "1d", "10y")
     # a mai, még tartó gyertyát leválasztjuk
     if t.timestamp() - gyertyak[-1][0] < 20 * 3600:
@@ -888,9 +915,6 @@ def eszkoz_helyzet(nev, napi_jel, perces_jel, kulcs, hangulat, t):
     friss = [x[oszlop] for x in hangulat if t.timestamp() - x[0] < 24 * 3600]
     poz, neg = sum(1 for x in friss if x > 0), sum(1 for x in friss if x < 0)
     hir_jel = (sum(friss) >= 2) - (sum(friss) <= -2)
-    osszeg = trend + hir_jel
-    irany = {2: "📈 emelkedő", 1: "↗️ enyhén emelkedő", 0: "➡️ semleges", -1: "↘️ enyhén csökkenő",
-             -2: "📉 csökkenő"}[max(-2, min(2, osszeg))]
     trend_szo = {1: "emelkedő", -1: "csökkenő", 0: "oldalazó"}[trend]
 
     mai = (most_ar / tegnap[4] - 1) * 100
@@ -917,8 +941,27 @@ def eszkoz_helyzet(nev, napi_jel, perces_jel, kulcs, hangulat, t):
     if nb.get("ot_perc"):
         sorok.append(f"<b>Scalping:</b> 16–18 óra között egy 5 perces gyertya ~{szam(nb['ot_perc'])}, "
                      f"fél óra ~{szam(nb['fel_ora'])} pont; ennél szorosabb stopot a zaj kiüt.")
-    sorok.append(f"<b>Irány:</b> {irany} (napi trend {trend_szo}, hírek 24 óra: {poz}+ / {neg}−)")
-    return "\n".join(sorok), talalat
+    delelott = 0
+    if nb.get("reggel") and nb.get("ar"):
+        valt = nb["ar"] - nb["reggel"]
+        delelott = (valt > 0.1 * atr) - (valt < -0.1 * atr)
+    reszek = {"trend": trend, "hir": hir_jel, "delelott": delelott, "dollar": -dollar}
+    osszeg = sum(reszek.values())
+    irany = {2: "📈 emelkedő", 1: "↗️ enyhén emelkedő", 0: "➡️ semleges", -1: "↘️ enyhén csökkenő",
+             -2: "📉 csökkenő"}[max(-2, min(2, osszeg))]
+    nyil = {1: "↑", 0: "→", -1: "↓"}
+    varakozas = None
+    if nb.get("sav"):
+        also, felso, bent, napok = nb["sav"]
+        varakozas = {"nev": nev, "ar": nb["ar"], "also": also, "felso": felso, "irany": (osszeg > 0) - (osszeg < 0),
+                     "reszek": reszek, "ts": nb["ar_ts"] + 300}
+        sorok.append(f"<b>{VARAKOZAS_VEGE}-ig várható sáv:</b> {szam(also)} – {szam(felso)} "
+                     f"(az elmúlt {napok} napon {bent:.0%}-ban maradt benne)")
+    jo, db = (stat or {}).get(kulcs, [0, 0, 0, 0])[:2]
+    meres = f"a bot saját mérése eddig {jo}/{db} ({jo / db:.0%})" if db else "a bot most kezdi mérni a találatot"
+    sorok.append(f"<b>Irány {VARAKOZAS_VEGE}-ig:</b> {irany} (napi trend {nyil[trend]}, hírek {poz}+/{neg}− {nyil[hir_jel]}, "
+                 f"délelőtt {nyil[delelott]}, dollár {nyil[dollar]}) – {meres}")
+    return "\n".join(sorok), talalat, varakozas
 
 
 def hatter_sor():
@@ -966,12 +1009,29 @@ def etf_sor(allapot, t):
             f"– {hatas} a Bitcoint. <i>Hírcímből, az előző kereskedési napra.</i>")
 
 
-def helyzetkep_szoveg(allapot, t):
+def dollar_delelott(t):
+    """A dollárindex iránya 9:00 óta: +1 erősödik, -1 gyengül, 0 alig mozdult (±0,1%)."""
+    try:
+        gy = [g for g in yahoo_gyertyak("DX-Y.NYB", "5m", "1d") if perc_napbol(g[0])[1] >= 9 * 60]
+    except Exception as e:
+        naplo(f"Dollárindex 5 perces hiba: {e}")
+        return 0
+    if len(gy) < 2:
+        return 0
+    v = (gy[-1][4] / gy[0][1] - 1) * 100
+    return (v >= 0.1) - (v <= -0.1)
+
+
+def helyzetkep_szoveg(allapot, t, varakozasok=None):
     hangulat = allapot.get("hir_hangulat", [])
     reszek, talalatok = [], []
+    dollar = dollar_delelott(t)
     for nev, napi_jel, perces_jel, kulcs in HELYZETKEP_ESZKOZOK:
         try:
-            szoveg, talalat = eszkoz_helyzet(nev, napi_jel, perces_jel, kulcs, hangulat, t)
+            szoveg, talalat, varakozas = eszkoz_helyzet(nev, napi_jel, perces_jel, kulcs, hangulat, t,
+                                                        dollar, allapot.get("varakozas_stat"))
+            if varakozas and varakozasok is not None:
+                varakozasok[kulcs] = varakozas
             if kulcs == "btc" and etf_sor(allapot, t):
                 szoveg += "\n" + etf_sor(allapot, t)
             reszek.append(szoveg)
@@ -996,8 +1056,9 @@ def helyzetkep_szoveg(allapot, t):
             "<i>Az árak a határidős piacról jönnek (a Bitcoin kivételével); a Trading 212 ára ettől pár tíz ponttal eltérhet, "
             "ezért a távolságokat (pontokat) figyeld, ne a pontos számokat. "
             "A nyitó sáv szélét 16–18 óra között szinte minden nap áttöri az ár, gyakran mindkét irányba (hamis kitörés). "
-            f"Az irányt a napi trend 10 év alatt csak így találta el: {', '.join(talalatok)}, a nyitó fél óra iránya pedig 45–54%-ban: "
-            "ez alig jobb a pénzfeldobásnál. Nem kereskedési jelzés.</i>")
+            f"Az irányt a napi trend 10 év alatt csak így találta el: {', '.join(talalatok)}; a délelőtti mozgás és a dollár "
+            f"16–21 óra között 52–54%-ban: ez alig jobb a pénzfeldobásnál. {VARAKOZAS_VEGE} után a bot megírja, bejött-e. "
+            "Nem kereskedési jelzés.</i>")
 
 
 def helyzetkep_ellenorzes(allapot, t):
@@ -1006,10 +1067,59 @@ def helyzetkep_ellenorzes(allapot, t):
     if (t.weekday() >= 5 or allapot.get("helyzetkep_datum") == ma
             or not ora_perc(HELYZETKEP_IDO) <= perc < ora_perc(HELYZETKEP_VEGE)):
         return
-    szoveg = helyzetkep_szoveg(allapot, t)
+    varakozasok = {}
+    szoveg = helyzetkep_szoveg(allapot, t, varakozasok)
     if szoveg and telegram_kuld(szoveg):
         allapot["helyzetkep_datum"] = ma
+        allapot["varakozas"] = {"datum": ma, "eszkozok": varakozasok, "kiertekelve": False}
         naplo("Napi helyzetkép elküldve.")
+
+
+def varakozas_ellenorzes(allapot, t):
+    """21:00 után megnézi, bejött-e a 16:00-s várakozás (irány és sáv), és elküldi az eredményt."""
+    v = allapot.get("varakozas") or {}
+    vege = datetime.combine(t.date(), datetime.strptime(VARAKOZAS_VEGE, "%H:%M").time(), HELYI_IDO)
+    if (v.get("datum") != t.date().isoformat() or v.get("kiertekelve")
+            or t < vege + timedelta(minutes=KIERTEKELES_KESES_PERC)):
+        return
+    stat = allapot.setdefault("varakozas_stat", {})
+    naplo_lista = allapot.setdefault("varakozas_naplo", [])
+    sorok = []
+    for nev, napi_jel, perces_jel, kulcs in HELYZETKEP_ESZKOZOK:
+        e = v["eszkozok"].get(kulcs)
+        if not e:
+            continue
+        try:
+            gy = [g for g in yahoo_gyertyak(perces_jel, "5m", "1d") if e["ts"] <= g[0] < vege.timestamp()]
+        except Exception as hiba:
+            naplo(f"Kiértékelési hiba ({nev}): {hiba}")
+            return  # a következő futás újrapróbálja
+        if not gy or (gy[-1][0] < vege.timestamp() - 600 and t < vege + timedelta(minutes=90)):
+            return  # még nincs meg a 21:00 előtti utolsó gyertya
+        zaro, csucs, mely = gy[-1][4], max(g[2] for g in gy), min(g[3] for g in gy)
+        valt = zaro - e["ar"]
+        s = stat.setdefault(kulcs, [0, 0, 0, 0])
+        sav_jo = e["also"] <= mely and csucs <= e["felso"]
+        s[2] += sav_jo
+        s[3] += 1
+        if e["irany"]:
+            irany_jo = valt * e["irany"] > 0
+            s[0] += irany_jo
+            s[1] += 1
+            irany_szoveg = f"irány {'↑' if e['irany'] > 0 else '↓'} {'✅ bejött' if irany_jo else '❌ nem jött be'}"
+        else:
+            irany_jo, irany_szoveg = None, "irány → (semleges, nem számít)"
+        naplo_lista.append([v["datum"], kulcs, e["irany"], round(valt / e["ar"] * 100, 3), sav_jo, e["reszek"]])
+        sorok.append(f"<b>{nev}</b>: {szam(e['ar'])} → {szam(zaro)} ({valt / e['ar'] * 100:+.2f}%); {irany_szoveg}; "
+                     f"sáv {szam(e['also'])}–{szam(e['felso'])} {'✅ benne maradt' if sav_jo else '❌ kilépett'} "
+                     f"(csúcs {szam(csucs)}, mélypont {szam(mely)})\n"
+                     f"   eddig: irány {s[0]}/{s[1]}{f' ({s[0] / s[1]:.0%})' if s[1] else ''}, sáv {s[2]}/{s[3]} ({s[2] / s[3]:.0%})")
+    allapot["varakozas_naplo"] = naplo_lista[-300:]
+    v["kiertekelve"] = True
+    if sorok and telegram_kuld(f"🧾 <b>Bejött-e a mai várakozás? ({t:%m.%d.}, {VARAKOZAS_VEGE})</b>\n\n" + "\n\n".join(sorok)
+                               + "\n\n<i>Ha az irány hetek alatt sem megy tartósan 55–60% fölé, nem érdemes rá kereskedni; "
+                                 "a sáv a stop és a cél kijelöléséhez hasznos.</i>"):
+        naplo("Várakozás kiértékelve és elküldve.")
 
 
 # --- Indítás ------------------------------------------------------------------
@@ -1018,7 +1128,7 @@ def helyzetkep_ellenorzes(allapot, t):
 def egy_ellenorzes():
     t = most()
     allapot = allapot_olvas()
-    for lepes in (naptar_ellenorzes, hirek_ellenorzes, arugras_ellenorzes, helyzetkep_ellenorzes):
+    for lepes in (naptar_ellenorzes, hirek_ellenorzes, arugras_ellenorzes, helyzetkep_ellenorzes, varakozas_ellenorzes):
         try:
             lepes(allapot, t)
         except Exception as e:
