@@ -298,28 +298,62 @@ def html(szoveg):
 # --- Telegram -----------------------------------------------------------------
 
 
-def telegram_kuld(szoveg, csak=None):
-    """Elküldi az üzenetet minden beállított címzettnek (TELEGRAM_CHAT_ID, vesszővel elválasztva),
-    vagy csak a `csak` listában szereplőknek. Igaz, ha legalább egy címzetthez megérkezett."""
+def cimzettek_olvas(tema="hirek"):
+    """A TELEGRAM_CHAT_ID-ból a téma címzettjei. Formátum: "<hírek>|<árak>", mindkét fele vesszővel
+    elválasztott lista; egy elem "csevegés" vagy "csevegés/téma" (csoporton belüli téma azonosítója).
+    Ha nincs benne "|", minden üzenet ugyanoda megy."""
+    felek = beallitasok_olvas().get("TELEGRAM_CHAT_ID", "").split("|")
+    resz = felek[1] if tema == "arak" and len(felek) > 1 else felek[0]
+    return [c.strip() for c in resz.split(",") if c.strip()]
+
+
+def telegram_kuld(szoveg, csak=None, tema="hirek"):
+    """Elküldi az üzenetet a téma címzettjeinek ("hirek": hírek és naptár, "arak": árugrás,
+    helyzetkép, javaslat, kiértékelés), vagy csak a `csak` listában szereplőknek.
+    Igaz, ha legalább egy címzetthez megérkezett."""
     b = beallitasok_olvas()
     token = b.get("TELEGRAM_TOKEN")
-    cimzettek = csak or [c.strip() for c in b.get("TELEGRAM_CHAT_ID", "").split(",") if c.strip()]
+    cimzettek = csak or cimzettek_olvas(tema)
     if not token or not cimzettek:
         naplo("NINCS BEÁLLÍTVA a Telegram, az üzenet nem ment el: " + szoveg[:80])
         return False
     sikeres = False
-    for chat in cimzettek:
-        adat = urllib.parse.urlencode({
-            "chat_id": chat, "text": szoveg, "parse_mode": "HTML",
-            "disable_web_page_preview": "true",
-        }).encode()
+    for cimzett in cimzettek:
+        chat, _, szal = cimzett.partition("/")
+        mezok = {"chat_id": chat, "text": szoveg, "parse_mode": "HTML", "disable_web_page_preview": "true"}
+        if szal:
+            mezok["message_thread_id"] = szal
+        adat = urllib.parse.urlencode(mezok).encode()
         try:
             req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=adat)
             with urllib.request.urlopen(req, timeout=20) as r:
                 sikeres = json.load(r).get("ok", False) or sikeres
         except Exception as e:
-            naplo(f"Telegram-hiba ({chat}): {e}")
+            naplo(f"Telegram-hiba ({cimzett}): {e}")
     return sikeres
+
+
+def telegram_temak():
+    """Kiírja a csoportokat és a témákat, ahová az elmúlt 24 órában írtak (a bot adminként benne van)."""
+    token = beallitasok_olvas().get("TELEGRAM_TOKEN")
+    try:
+        valasz = json.loads(letolt(f"https://api.telegram.org/bot{token}/getUpdates"))
+    except Exception as e:
+        print(f"Nem sikerült elérni a Telegramot: {e}")
+        return
+    latott = {}
+    for u in valasz.get("result", []):
+        m = u.get("message") or u.get("channel_post") or {}
+        chat = m.get("chat")
+        if not chat:
+            continue
+        tema = (m.get("forum_topic_created") or (m.get("reply_to_message") or {}).get("forum_topic_created") or {}).get("name", "")
+        kulcs = f"{chat['id']}/{m['message_thread_id']}" if m.get("is_topic_message") else str(chat["id"])
+        latott[kulcs] = f"{chat.get('title') or chat.get('first_name', '')} {('– ' + tema) if tema else ''}".strip()
+    for kulcs, nev in latott.items():
+        print(f"{kulcs:30} {nev}")
+    if not latott:
+        print("Nincs friss üzenet. Írj egyet-egyet mindkét témába, aztán futtasd újra.")
 
 
 def telegram_beallitas():
@@ -333,6 +367,9 @@ def telegram_beallitas():
         valasz = json.loads(letolt(f"https://api.telegram.org/bot{token}/getUpdates"))
     except Exception as e:
         print(f"Nem sikerült elérni a Telegramot (rossz a token?): {e}")
+        return
+    if "|" in b.get("TELEGRAM_CHAT_ID", ""):
+        print("A címzettek témákra vannak bontva (hírek|árak); ezt kézzel kell szerkeszteni, lásd --temak.")
         return
     meglevok = [c.strip() for c in b.get("TELEGRAM_CHAT_ID", "").split(",") if c.strip()]
     ujak = {}
@@ -788,7 +825,7 @@ def arugras_ellenorzes(allapot, t):
         regi_sz, mostani_sz = (f"{x:,.2f}".replace(",", " ") for x in (regi, mostani))
         szoveg = (f"⚡ {jel_kep} <b>{nev}: {ARUGRAS_ABLAK_PERC} perc alatt {abs(valtozas):.2f}%-ot {irany}</b>\n"
                   f"{regi_sz} → {mostani_sz}\n\nValószínűleg hír vagy adat van mögötte. Ha van nyitott pozíciód, nézz rá.")
-        if telegram_kuld(szoveg):
+        if telegram_kuld(szoveg, tema="arak"):
             utolso[nev] = t.timestamp()
             naplo(f"Árugrás elküldve: {nev} {valtozas:+.2f}%")
 
@@ -1069,11 +1106,11 @@ def helyzetkep_ellenorzes(allapot, t):
         return
     varakozasok = {}
     szoveg = helyzetkep_szoveg(allapot, t, varakozasok)
-    if szoveg and telegram_kuld(szoveg):
+    if szoveg and telegram_kuld(szoveg, tema="arak"):
         allapot["helyzetkep_datum"] = ma
         allapot["varakozas"] = {"datum": ma, "eszkozok": varakozasok, "kiertekelve": False}
         naplo("Napi helyzetkép elküldve.")
-        if varakozasok and telegram_kuld(javaslat_szoveg(varakozasok, allapot.get("varakozas_stat") or {}, t)):
+        if varakozasok and telegram_kuld(javaslat_szoveg(varakozasok, allapot.get("varakozas_stat") or {}, t), tema="arak"):
             naplo("Napi javaslat elküldve.")
 
 
@@ -1168,7 +1205,7 @@ def varakozas_ellenorzes(allapot, t):
     v["kiertekelve"] = True
     if sorok and telegram_kuld(f"🧾 <b>Bejött-e a mai javaslat? ({t:%m.%d.}, {VARAKOZAS_VEGE})</b>\n\n" + "\n\n".join(sorok)
                                + "\n\n<i>R = a kockázat egysége: +1 R = annyit nyertél, amennyit kockáztattál (1%-os kockázatnál a számla 1%-a). "
-                                 "Ha az összes R hetek alatt sem megy tartósan pluszba, nem érdemes rá kereskedni.</i>"):
+                                 "Ha az összes R hetek alatt sem megy tartósan pluszba, nem érdemes rá kereskedni.</i>", tema="arak"):
         naplo("Várakozás kiértékelve és elküldve.")
 
 
@@ -1202,8 +1239,12 @@ if __name__ == "__main__":
     parancs = sys.argv[1] if len(sys.argv) > 1 else ""
     if parancs == "--beallitas":
         telegram_beallitas()
+    elif parancs == "--temak":
+        telegram_temak()
     elif parancs == "--teszt":
-        print("Elküldve." if telegram_kuld("🔔 Próbaüzenet a hírfigyelőtől.") else "Nem sikerült, nézd meg a hirfigyelo.log-ot.")
+        for tema, nev in (("hirek", "hírek"), ("arak", "árak")):
+            ok = telegram_kuld(f"🔔 Próbaüzenet a hírfigyelőtől ({nev}).", tema=tema)
+            print(f"{nev}: " + ("elküldve." if ok else "nem sikerült, nézd meg a hirfigyelo.log-ot."))
     elif parancs == "--ciklus":
         # pl. --ciklus 3 5: háromszor ellenőriz, 5 percenként (a GitHub Actions így hívja)
         db, perc = int(sys.argv[2]), float(sys.argv[3])
@@ -1217,6 +1258,6 @@ if __name__ == "__main__":
         szoveg = helyzetkep_szoveg(allapot_olvas(), most())
         print(szoveg)
         if "--kuld" in sys.argv:
-            print("Elküldve." if telegram_kuld(szoveg) else "Nem sikerült.")
+            print("Elküldve." if telegram_kuld(szoveg, tema="arak") else "Nem sikerült.")
     else:
         egy_ellenorzes()
