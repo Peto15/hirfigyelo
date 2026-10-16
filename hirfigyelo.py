@@ -23,6 +23,7 @@ Futtatás:
   python3 hirfigyelo.py --helyzetkep [--kuld]  a napi helyzetkép kiírása (és elküldése)
 """
 
+import hashlib
 import html as htmlmod
 import json
 import os
@@ -1212,10 +1213,22 @@ def varakozas_ellenorzes(allapot, t):
 # --- Indítás ------------------------------------------------------------------
 
 
+def cimzett_ellenorzes(allapot, t):
+    """Ha megváltoztak a címzettek, egyszer üzen mindkét témába, hogy látszódjon: ide küld a bot."""
+    ujlenyomat = hashlib.sha256(beallitasok_olvas().get("TELEGRAM_CHAT_ID", "").encode()).hexdigest()[:12]
+    if allapot.get("cimzett_lenyomat") == ujlenyomat:
+        return
+    ok = [telegram_kuld(f"✅ Beállítás rendben: a hírfigyelő ide küldi a(z) {nev} üzeneteket.", tema=tema)
+          for tema, nev in (("hirek", "híreket és a naptárat"), ("arak", "helyzetképet, javaslatot, kiértékelést és árugrást"))]
+    if all(ok):
+        allapot["cimzett_lenyomat"] = ujlenyomat
+        naplo("Új címzettek visszaigazolva.")
+
+
 def egy_ellenorzes():
     t = most()
     allapot = allapot_olvas()
-    for lepes in (naptar_ellenorzes, hirek_ellenorzes, arugras_ellenorzes, helyzetkep_ellenorzes, varakozas_ellenorzes):
+    for lepes in (cimzett_ellenorzes, naptar_ellenorzes, hirek_ellenorzes, arugras_ellenorzes, helyzetkep_ellenorzes, varakozas_ellenorzes):
         try:
             lepes(allapot, t)
         except Exception as e:
