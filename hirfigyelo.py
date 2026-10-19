@@ -8,7 +8,7 @@ Háromféle értesítést küld:
   2. Friss hírek: nagy hírforrások (Reuters, Bloomberg, CNBC stb.) címei
      kulcsszavakra szűrve.
   3. Nagy árugrás: ha valamelyik eszköz 15 perc alatt szokatlanul nagyot mozdul.
-  4. Napi helyzetkép (hétköznap 16:00, napon belüli kereskedéshez): szintek, hátralévő mozgás, scalping-stop,
+  4. Napi helyzetkép (hétköznap 10:00, napon belüli kereskedéshez): szintek, hátralévő mozgás, scalping-stop,
      várható sáv és irány 21:00-ig (21:15 után a bot kiértékeli, bejött-e, és számolja a találati arányt),
      dollárindex és 10 éves hozam, Bitcoin-ETF pénzáramlás (hírcímekből), mai gyorsjelentések.
   A reggeli összefoglalóban a Fed-tagok beszédei és a nagy techcégek gyorsjelentései is benne vannak;
@@ -67,11 +67,11 @@ HIR_JEL_ESZKOZOK = {"nq": ("USA Tech 100", "NQ=F"), "arany": ("Arany", "GC=F"), 
 ARUGRAS_ABLAK_PERC = 15
 ARUGRAS_SZUNET_PERC = 60         # ugyanarra az eszközre ennyi ideig nem szól újra
 
-HELYZETKEP_IDO = "16:00"         # napi helyzetkép (hétköznap), amikor a nyitó sáv (15:30–16:00) kész
+HELYZETKEP_IDO = "10:00"         # napi helyzetkép (hétköznap) délelőtt, hogy egész nap lehessen vele tervezni
 US_IDO = ZoneInfo("America/New_York")
 US_NYITAS = "09:30"              # az amerikai tőzsde nyitása New York-i idő szerint (magyar idő: 15:30, az
 US_ZARAS = "16:00"               # óraátállítások közti 1-2 hétben 14:30); zárás magyar idő szerint 22:00 / 21:00
-HELYZETKEP_VEGE = "18:00"        # ha a gép aludt, eddig még elküldi
+HELYZETKEP_VEGE = "12:00"        # ha a futás késik, eddig még elküldi
 KERESKEDESI_SAV = ("16:00", "18:00")  # ebben a sávban méri a félórás mozgást
 VARAKOZAS_VEGE = "21:00"         # a napvégi várakozás eddig szól; utána a bot kiértékeli
 VARAKOZAS_SAV_ARANY = 0.70       # a várható sávot úgy méretezi, hogy a múltban ennyi napon belül maradjon
@@ -1194,9 +1194,10 @@ def helyzetkep_szoveg(allapot, t, varakozasok=None):
             + f"\n\n📅 {html(esemeny)}" + jelentes + "\n\n"
             "<i>Az árak a határidős piacról jönnek (a Bitcoin kivételével); a Trading 212 ára ettől pár tíz ponttal eltérhet, "
             "ezért a távolságokat (pontokat) figyeld, ne a pontos számokat. "
-            "A nyitó sáv szélét 16–18 óra között szinte minden nap áttöri az ár, gyakran mindkét irányba (hamis kitörés). "
-            f"Az irányt a napi trend 10 év alatt csak így találta el: {', '.join(talalatok)}; a délelőtti mozgás és a dollár "
-            f"16–21 óra között 52–54%-ban: ez alig jobb a pénzfeldobásnál. {VARAKOZAS_VEGE} után a bot megírja, bejött-e. "
+            "Az amerikai nyitás (15:30) körül nagy mozgás szokott jönni, és a nyitó fél óra szélét 16–18 óra között szinte "
+            "minden nap áttöri az ár, gyakran mindkét irányba (hamis kitörés). "
+            f"Az irányt a napi trend 10 év alatt csak így találta el: {', '.join(talalatok)}: ez alig jobb a pénzfeldobásnál. "
+            f"{VARAKOZAS_VEGE} után a bot megírja, bejött-e. "
             "Nem kereskedési jelzés.</i>")
 
 
@@ -1239,14 +1240,17 @@ def javaslat_szoveg(varakozasok, stat, t):
                      f"Cél {szam(cel)} ({szam(nyereseg)} pont) · Kiszállás legkésőbb {VARAKOZAS_VEGE}\n"
                      f"   Kockázat:nyereség = 1:{nyereseg / kockazat:.1f}; pozícióméret = a kockázatod (pl. a számla 1%-a) ÷ {szam(kockazat)} pont")
     return (f"🎯 <b>Mai javaslat ({t:%m.%d.} {t:%H:%M} – {VARAKOZAS_VEGE})</b>\n\n" + "\n\n".join(sorok)
-            + f"\n\n<i>A stop és a cél a várható sáv széle (a múltban kb. 70%-ban nem lépett ki belőle). Az ár ~10 percet késik és "
+            + f"\n\n<i>A beszállási ár a mostani (délelőtti) ár. Ha később, pl. 16:00 után szállsz be, a stop és a cél "
+              f"ugyanazon a szinten marad, de a távolságok és az arány megváltozik: ha az ár addigra már a cél közelében jár, "
+              f"inkább hagyd ki. "
+              f"A stop és a cél a várható sáv széle (a múltban kb. 70%-ban nem lépett ki belőle). Az ár ~10 percet késik és "
               f"a határidős piacról jön, a Trading 212-ben a pontos számok eltérhetnek: a pont-távolságokat használd. "
               f"Szabályalapú gyakorló javaslat, nem befektetési tanács; amíg az „eddig” arány hetek alatt sem megy "
               f"55–60% fölé, csak gyakorló (demó) számlán kövesd. {VARAKOZAS_VEGE} után jön az eredmény.</i>")
 
 
 def varakozas_ellenorzes(allapot, t):
-    """21:00 után megnézi, bejött-e a 16:00-s várakozás (irány és sáv), és elküldi az eredményt."""
+    """21:00 után megnézi, bejött-e a délelőtti várakozás (irány és sáv), és elküldi az eredményt."""
     v = allapot.get("varakozas") or {}
     vege = datetime.combine(t.date(), datetime.strptime(VARAKOZAS_VEGE, "%H:%M").time(), HELYI_IDO)
     if (v.get("datum") != t.date().isoformat() or v.get("kiertekelve")
