@@ -61,6 +61,9 @@ ESZKOZOK = [
     ("Arany", "yahoo", "GC=F", 0.6),
     ("Bitcoin", "yahoo", "BTC-USD", 1.5),  # a Binance a GitHub szervereit letiltja (HTTP 451)
 ]
+# Hírjelzések utólagos ellenőrzése: a hír kiküldésekor várt irány bejött-e ennyi perc alatt
+HIR_KIERTEKELES_PERC = 30
+HIR_JEL_ESZKOZOK = {"nq": ("USA Tech 100", "NQ=F"), "arany": ("Arany", "GC=F"), "btc": ("Bitcoin", "BTC-USD")}
 ARUGRAS_ABLAK_PERC = 15
 ARUGRAS_SZUNET_PERC = 60         # ugyanarra az eszközre ennyi ideig nem szól újra
 
@@ -148,7 +151,9 @@ IRANY_SZABALYOK = [
      {"nq": -1, "arany": -1, "btc": -1}, "Magasabb infláció: a Fed nehezebben csökkent kamatot, ez lefelé húzza az árakat."),
     ("inflacio", rf"(cool\w*|eas\w*|slow\w*|lower|soft\w*|fall\w*).{{0,30}}{_INFL}|{_INFL}.{{0,30}}(cool\w*|eas\w*|slow\w*|softer|fall\w*|miss\w*)",
      {"nq": 1, "arany": 1, "btc": 1}, "Alacsonyabb infláció: közelebb a kamatcsökkentés, ez felfelé viheti az árakat."),
-    ("beke", r"\b(ceasefire|truce|peace (deal|talks|agreement|plan))\b", {"nq": 1, "arany": -1, "btc": 1},
+    ("beke", r"\b(ceasefire|truce|armistice|de-?escalat\w*|peace (deal|talks|agreement|plan|summit|process)"
+             r"|(summit|talks|negotiat\w*|meeting)\b.{0,50}\bwar\b|\bwar\b.{0,30}\b(talks|summit|negotiat\w*)"
+             r"|end(s|ing)? (the |to the )?war)\b", {"nq": 1, "arany": -1, "btc": 1},
      "Enyhülő feszültség: a kockázatos eszközök emelkedhetnek, az arany mint menedék veszíthet."),
     ("haboru", r"\b(war|missiles?|invasion|invades?|military strikes?|air ?strikes?|attacks?|escalat\w*)\b", {"nq": -1, "arany": 1, "btc": -1},
      "Háborús feszültség: a befektetők a kockázatos eszközökből a biztonságos arany felé menekülnek."),
@@ -642,6 +647,9 @@ def irany_becsles(szovegek):
         for csoport, minta, hatas, magyarazat in IRANY_SZABALYOK:
             if csoport in csoportok:
                 continue
+            # ha a mondat béketárgyalásról szól, a benne szereplő „war” nem háborús eszkalációt jelent
+            if csoport == "haboru" and "beke" in csoportok:
+                continue
             talalat = minta.search(szoveg)
             if not talalat:
                 continue
@@ -676,7 +684,57 @@ def irany_sor(irany):
     return f"USA Tech 100 {jel(irany['nq'])} · Arany {jel(irany['arany'])} · Bitcoin {jel(irany['btc'])}"
 
 
-def hir_uzenet(h):
+_AR_GYORSITOTAR = {}
+
+
+def utolso_ar(jel):
+    """A legutolsó ismert ár és időpontja (a Yahoo a határidős árakat kb. 10 percet késve adja); egy futáson belül
+    ugyanazt az eszközt csak egyszer kéri le."""
+    if jel not in _AR_GYORSITOTAR:
+        try:
+            _AR_GYORSITOTAR[jel] = arak_yahoo(jel)[-1]
+        except Exception as e:
+            naplo(f"Árletöltési hiba ({jel}): {e}")
+            _AR_GYORSITOTAR[jel] = None
+    return _AR_GYORSITOTAR[jel]
+
+
+def hir_stat_sor(stat):
+    """Az eddigi hírjelzések találati aránya eszközönként, pl. „USA Tech 100 7/12 (58%)”."""
+    reszek = []
+    for e, (nev, _) in HIR_JEL_ESZKOZOK.items():
+        jo, db = (stat.get(e) or [0, 0])[:2]
+        if db:
+            reszek.append(f"{nev} {jo}/{db} ({round(100 * jo / db)}%)")
+    return " · ".join(reszek)
+
+
+def varhato_sorok(irany, t):
+    """Eszközönként egy sor: mi várható most (emelkedés / esés), és mennyi most az ár."""
+    sorok = []
+    for e, (nev, jel) in HIR_JEL_ESZKOZOK.items():
+        p = irany.get(e)
+        if p is None:
+            sorok.append(f"➖ {nev}: nem érinti")
+            continue
+        if p == 0:
+            sorok.append(f"↕️ {nev}: bizonytalan (ellentétes jelek)")
+            continue
+        szo, kep = ("EMELKEDÉS", "📈") if p > 0 else ("ESÉS", "📉")
+        erosseg = " (erős)" if abs(p) >= 6 else ""
+        ar = utolso_ar(jel)
+        ar_szoveg = ""
+        if ar:
+            if t.timestamp() - ar[0] > 25 * 60:
+                ar_szoveg = " · most zárva a piac"
+            else:
+                ar_szoveg = " · most kb. " + f"{ar[1]:,.0f}".replace(",", " ")
+        sorok.append(f"{kep} {nev}: <b>{szo}</b> várható{erosseg}{ar_szoveg}")
+    return sorok
+
+
+def hir_uzenet(h, stat=None, t=None):
+    t = t or most()
     mondatok = []
     if h["olvashato"]:
         try:
@@ -695,15 +753,55 @@ def hir_uzenet(h):
         if roviden:
             szoveg += f"\n<b>Röviden:</b> {html(roviden)}\n"
     if any(p is not None for p in irany.values()):
-        szoveg += f"\n<b>Lehetséges hatás:</b> {irany_sor(irany)}\n"
+        szoveg += "\n<b>Mi várható most?</b>\n" + "\n".join(varhato_sorok(irany, t)) + "\n"
         if okok:
             szoveg += "<b>Miért:</b> " + " ".join(html(o) for o in okok[:2]) + "\n"
+        eddig = hir_stat_sor(stat or {})
+        if eddig:
+            szoveg += f"<b>Eddig bejött ({HIR_KIERTEKELES_PERC} percen belül):</b> {eddig}\n"
     else:
-        szoveg += "\n<b>Lehetséges hatás:</b> nem egyértelmű, nézz rá az árakra.\n"
+        szoveg += "\n<b>Mi várható most?</b> Nem egyértelmű, nézz rá az árakra.\n"
     alap = "a teljes cikk alapján" if len(mondatok) > 1 else "csak a cím alapján (a cikk nem olvasható)"
     szoveg += (f"<a href=\"{html(h['link'])}\">Megnyitás</a>\n"
-               f"<i>Szabályalapú becslés {alap}, nem kereskedési jelzés. ↕ = ellentétes jelek, ↑↑/↓↓ = erős.</i>")
+               f"<i>Szabályalapú becslés {alap}, nem kereskedési jelzés. {HIR_KIERTEKELES_PERC} perc múlva a bot "
+               f"megnézi, bejött-e.</i>")
     return szoveg, irany
+
+
+def hirjelzes_kiertekeles(allapot, t):
+    """A kiküldött hírek várt iránya bejött-e HIR_KIERTEKELES_PERC perc alatt. A Yahoo késése miatt csak
+    +15 perc után néz rá; ha a piac zárva volt, az eszközt nem számolja."""
+    jelzesek = allapot.get("hir_jelzesek", [])
+    stat = allapot.setdefault("hir_stat", {})
+    maradt, gyertyak = [], {}
+    for ts, cim, varakozas in jelzesek:
+        if t.timestamp() - ts < (HIR_KIERTEKELES_PERC + KIERTEKELES_KESES_PERC) * 60:
+            maradt.append([ts, cim, varakozas])
+            continue
+        if t.timestamp() - ts > 3 * 24 * 3600:
+            continue  # túl régi, a percadatok már nem elérhetők
+        for e, irany in varakozas.items():
+            jel = HIR_JEL_ESZKOZOK[e][1]
+            try:
+                if jel not in gyertyak:
+                    gyertyak[jel] = yahoo_gyertyak(jel, "1m", "5d")
+                arak = [(g[0], g[4]) for g in gyertyak[jel] if g[4] is not None]
+            except Exception as ex:
+                naplo(f"Hírjelzés-kiértékelési hiba ({jel}): {ex}")
+                maradt.append([ts, cim, varakozas])
+                break
+            elotte = [a for a in arak if ts - 10 * 60 <= a[0] <= ts]
+            utana = [a for a in arak if ts + HIR_KIERTEKELES_PERC * 60 - 10 * 60 <= a[0] <= ts + HIR_KIERTEKELES_PERC * 60]
+            if not elotte or not utana:
+                continue  # zárva volt a piac
+            valtozas = (utana[-1][1] / elotte[-1][1] - 1) * 100
+            s = stat.setdefault(e, [0, 0, 0.0])
+            s[0] += int(valtozas * irany > 0)
+            s[1] += 1
+            s[2] = round(s[2] + valtozas * irany, 4)  # a várt irányban mért összes elmozdulás (%)
+            naplo(f"Hírjelzés kiértékelve ({HIR_JEL_ESZKOZOK[e][0]}, {'fel' if irany > 0 else 'le'}): "
+                  f"{valtozas:+.2f}% – {cim[:60]}")
+    allapot["hir_jelzesek"] = maradt
 
 
 _OSSZEG = r"\$\s?([\d.,]+)\s*(million|billion|bn|m|b)\b"
@@ -771,10 +869,13 @@ def hirek_ellenorzes(allapot, t):
     hangulat = [x for x in allapot.get("hir_hangulat", []) if t.timestamp() - x[0] < 48 * 3600]
     for h in sorted(jeloltek, key=lambda h: h["ido"], reverse=True):
         if not csendes_e(t) and len(kuldesek) < HIR_MAX_ORANKENT:
-            szoveg, irany = hir_uzenet(h)
+            szoveg, irany = hir_uzenet(h, allapot.get("hir_stat"), t)
             if telegram_kuld(szoveg):
                 kuldesek.append(t.timestamp())
                 naplo(f"Hír elküldve: {h['cim']}")
+                varakozas = {e: (1 if p > 0 else -1) for e, p in irany.items() if p}
+                if varakozas:
+                    allapot.setdefault("hir_jelzesek", []).append([t.timestamp(), h["cim"][:100], varakozas])
         else:
             irany, _ = irany_becsles([(h["cim"], 3)])
             naplo(f"Hír nem ment ki (csendes idő vagy óránkénti korlát): {h['cim']}")
@@ -1228,7 +1329,7 @@ def cimzett_ellenorzes(allapot, t):
 def egy_ellenorzes():
     t = most()
     allapot = allapot_olvas()
-    for lepes in (cimzett_ellenorzes, naptar_ellenorzes, hirek_ellenorzes, arugras_ellenorzes, helyzetkep_ellenorzes, varakozas_ellenorzes):
+    for lepes in (cimzett_ellenorzes, naptar_ellenorzes, hirek_ellenorzes, hirjelzes_kiertekeles, arugras_ellenorzes, helyzetkep_ellenorzes, varakozas_ellenorzes):
         try:
             lepes(allapot, t)
         except Exception as e:
