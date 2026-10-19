@@ -135,36 +135,58 @@ HIR_MAX_KOR_PERC = 30            # ennél régebbi hírről már nem szól
 # Irány-szabályok a hírekhez: (csoport, minta, hatás, magyarázat).
 # Hatás: +1 felfelé, -1 lefelé a USA Tech 100-ra (nq), az aranyra és a Bitcoinra.
 # Egy csoportból csak az első illeszkedő szabály számít (ezért van elöl a pontosabb minta).
-_INFL = r"(inflation|cpi|ppi|price pressures?)"
+_INFL = r"(inflation|cpi|ppi|price pressures?|consumer prices|producer prices)"
 _FEL = r"(surge\w*|soar\w*|jump\w*|rall(y|ies|ied)|record|climb\w*|ris(e|es|ing)|gain\w*|advanc\w*|highest)"
 _LE = r"(plung\w*|tumbl\w*|slump\w*|sell-?off|crash\w*|sink\w*|sank|fall\w*|fell|drop\w*|slid\w*|lowest)"
+# A szabályokat 2026-10-19-én 7 nap valódi hírén visszamértem (eszkozok/szabaly_meres.py): a Bitcoinra a makróhírek
+# (infláció, vám) iránya nem jött be, és az „ár már megmozdult” típusú címek (pl. „bitcoin slides”) után az ár
+# inkább visszafordult, ezért ezek nem adnak irányt. Az arany a kamat- és hozamhírekre (magas infláció mellett)
+# a tankönyvivel ellentétesen mozgott (7/22, 2/7), ezért ott az aranyra nincs irány, amíg több adat nem lesz.
+# Módosítás után: eszkozok/szabaly_peldak.py és a visszamérés.
 IRANY_SZABALYOK = [
-    ("kamat", r"(temper\w*|cool\w*|eas\w*|fad\w*|dim\w*|pare\w*|trim\w*).{0,25}(rate[- ]?hike|hike)", {"nq": 1, "arany": 1, "btc": 1},
-     "Csökken a kamatemelés esélye: ez általában felfelé viszi a részvényeket, az aranyat és a Bitcoint."),
-    ("kamat", r"(rate[- ]?hikes?|hike bets|rais\w* rates|hawkish|tightening)", {"nq": -1, "arany": -1, "btc": -1},
-     "Magasabb kamat jöhet: drágul a hitel, erősödik a dollár, ez a részvényeknek, az aranynak és a Bitcoinnak is rossz."),
-    ("kamat", r"(rate[- ]?cuts?|cuts? rates|cutting rates|dovish|easing)", {"nq": 1, "arany": 1, "btc": 1},
-     "Kamatcsökkentés jöhet: olcsóbb pénz, gyengébb dollár, ez általában felfelé viszi őket."),
+    ("kamat", r"(temper\w*|cool\w*|eas\w*|fad\w*|dim\w*|pare\w*|trim\w*).{0,25}(rate[- ]?hike|hike)"
+              r"|(rate[- ]?hikes?|hike) (bets|expectations|odds|fears|worries) (eas\w*|fad\w*|cool\w*|reced\w*|dim\w*|fall\w*|drop\w*)",
+     {"nq": 1, "btc": 1},
+     "Csökken a kamatemelés esélye: ez általában felfelé viszi a részvényeket és a Bitcoint."),
+    ("kamat", r"(rate[- ]?hikes?|hike bets|hike (twice|again)|half[- ]point (hike|increase)|rais\w* rates|hawkish|tightening)",
+     {"nq": -1, "btc": -1},
+     "Magasabb kamat jöhet: drágul a hitel, erősödik a dollár, ez a részvényeknek és a Bitcoinnak rossz."),
+    ("kamat", r"(rate[- ]?cuts?|cuts? rates|cutting rates|dovish|monetary easing|policy easing|easing cycle)", {"nq": 1, "btc": 1},
+     "Kamatcsökkentés jöhet: olcsóbb pénz, gyengébb dollár, ez általában felfelé viszi a részvényeket és a Bitcoint."),
     ("kamat", r"(holds? rates|keeps? rates|rates? (unchanged|on hold)|leaves? rates)", {},
      "A kamat nem változik: a hatás azon múlik, mit mond a Fed a jövőről."),
-    ("inflacio", rf"(hot\w*|higher|hotter|jump\w*|ris(e|es|ing)|surg\w*|accelerat\w*|hits?|tops?).{{0,30}}{_INFL}|{_INFL}.{{0,30}}(hot\w*|jump\w*|ris(e|es|ing)|surg\w*|accelerat\w*|hits?|higher|tops?|beats?)",
-     {"nq": -1, "arany": -1, "btc": -1}, "Magasabb infláció: a Fed nehezebben csökkent kamatot, ez lefelé húzza az árakat."),
+    ("inflacio", rf"(hot\w*|higher|hotter|jump\w*|ris(e|es|ing|en)|rose|surg\w*|accelerat\w*|roar\w*|rebound\w*|sticky|stubborn|persistent|notable|hits?|tops?).{{0,30}}{_INFL}"
+                 rf"|{_INFL}.{{0,30}}(hot\w*|jump\w*|ris(e|es|ing|en)|rose|surg\w*|accelerat\w*|roar\w*|rebound\w*|hits?|higher|tops?|beats?)",
+     {"nq": -1, "arany": -1}, "Magasabb infláció: a Fed nehezebben csökkent kamatot, ez lefelé húzza az árakat."),
     ("inflacio", rf"(cool\w*|eas\w*|slow\w*|lower|soft\w*|fall\w*).{{0,30}}{_INFL}|{_INFL}.{{0,30}}(cool\w*|eas\w*|slow\w*|softer|fall\w*|miss\w*)",
-     {"nq": 1, "arany": 1, "btc": 1}, "Alacsonyabb infláció: közelebb a kamatcsökkentés, ez felfelé viheti az árakat."),
+     {"nq": 1, "arany": 1}, "Alacsonyabb infláció: közelebb a kamatcsökkentés, ez felfelé viheti az árakat."),
     ("beke", r"\b(ceasefire|truce|armistice|de-?escalat\w*|peace (deal|talks|agreement|plan|summit|process)"
              r"|(summit|talks|negotiat\w*|meeting)\b.{0,50}\bwar\b|\bwar\b.{0,30}\b(talks|summit|negotiat\w*)"
              r"|end(s|ing)? (the |to the )?war)\b", {"nq": 1, "arany": -1, "btc": 1},
      "Enyhülő feszültség: a kockázatos eszközök emelkedhetnek, az arany mint menedék veszíthet."),
-    ("haboru", r"\b(war|missiles?|invasion|invades?|military strikes?|air ?strikes?|attacks?|escalat\w*)\b", {"nq": -1, "arany": 1, "btc": -1},
+    ("haboru", r"\b((?<!trade )(?<!price )(?<!hybrid )war(?! chest)|missiles?|invasion|invades?|military strikes?|air ?strikes?|attacks?|escalat\w*)\b",
+     {"nq": -1, "arany": 1, "btc": -1},
      "Háborús feszültség: a befektetők a kockázatos eszközökből a biztonságos arany felé menekülnek."),
-    ("vam", r"\b(tariffs?|trade war|export (bans?|controls?))\b", {"nq": -1, "arany": 1, "btc": -1},
+    ("vam", r"(paus\w*|suspend\w*|lift\w*|cut\w*|lower\w*|roll\w* back|eas\w*|delay\w*|exempt\w*|scrap\w*|waiv\w*).{0,25}\btariffs?\b"
+            r"|\btariffs?\b.{0,25}\b(relief|exemptions?|truce|pause|cuts?|waivers?)\b|\btrade (deal|truce|agreement)\b",
+     {"nq": 1, "arany": -1}, "Enyhülő vámháború: a cégek kilátásai javulnak, kevésbé kell a menedék."),
+    ("vam", r"\b(tariffs?|trade war|export (bans?|controls?))\b", {"nq": -1, "arany": 1},
      "Vámok, kereskedelmi háború: csökkenhet a cégek nyeresége, az arany a menedék."),
-    ("szankcio", r"\bsanctions?\b", {"nq": -1, "arany": 1},
+    ("szankcio", r"(waiv\w*|eas\w*|lift\w*|relax\w*|loosen\w*|suspend\w*|roll\w* back|scrap\w*|paus\w*).{0,30}\bsanctions?\b"
+                 r"|\bsanctions?\b.{0,25}\b(relief|waivers?|eased|lifted|relaxed|suspended)\b", {"nq": 1},
+     "Szankciók enyhítése: csökken a feszültség, olcsóbb lehet az olaj, ez a részvényeknek jó."),
+    ("szankcio", r"\bsanctions?\b", {"arany": 1},
      "Szankciók: nő a bizonytalanság, ez az aranynak kedvez."),
-    ("valsag", r"\b(recession|shutdown|default|bankrupt\w*|bank (run|failures?|collapse))\b", {"nq": -1, "arany": 1, "btc": -1},
-     "Gazdasági válság jele: a részvények eshetnek, az arany a menedék."),
+    ("valsag", r"\b(recession|shutdown|(debt|sovereign) default|defaults? on|bankrupt\w*|bank (run|failures?|collapse))\b",
+     {"nq": -1, "arany": 1, "btc": -1}, "Gazdasági válság jele: a részvények eshetnek, az arany a menedék."),
     ("olaj", rf"\boil\b.{{0,30}}{_FEL}", {"nq": -1, "arany": 1},
      "Dráguló olaj: nő az inflációs félelem."),
+    ("olaj", rf"\boil\b.{{0,30}}{_LE}", {"nq": 1},
+     "Olcsóbb olaj: csökken az inflációs félelem, ez a részvényeknek jó."),
+    ("hozam", rf"(treasury|bond) yields?.{{0,30}}({_FEL})|(ris\w*|higher|climb\w*|surg\w*) (treasury |bond )?yields",
+     {"nq": -1}, "Emelkedő kötvényhozam: drágább a pénz, ez a techcégeknek rossz."),
+    ("hozam", rf"(treasury|bond) yields?.{{0,30}}({_LE}|eas\w*|retreat\w*)|(eas\w*|lower|fall\w*|declin\w*) (treasury |bond )?yields",
+     {"nq": 1}, "Csökkenő kötvényhozam: olcsóbb a pénz, ez a techcégeknek jó."),
     ("dollar", rf"\bdollar\b.{{0,30}}({_FEL}|strengthen\w*)", {"arany": -1, "btc": -1},
      "Erősödő dollár: dollárban drágább az arany és a Bitcoin, ez lefelé nyomja őket."),
     ("dollar", rf"\bdollar\b.{{0,30}}({_LE}|weaken\w*)", {"arany": 1, "btc": 1},
@@ -183,13 +205,15 @@ IRANY_SZABALYOK = [
      "A részvénypiac már esik."),
     ("reszveny", rf"(stocks?|nasdaq|wall street|equities|tech shares|s&p).{{0,40}}{_FEL}", {"nq": 1},
      "A részvénypiac már emelkedik."),
-    ("arany", rf"\bgold\b.{{0,30}}{_LE}", {"arany": -1}, ""),
-    ("arany", rf"\bgold\b.{{0,30}}{_FEL}", {"arany": 1}, ""),
-    ("kripto", rf"(bitcoin|crypto|btc).{{0,40}}({_LE}|outflows?|hack\w*|bans?|sues?|lawsuit)|\bsec\b.{{0,40}}(sues?|charges?|lawsuit)", {"btc": -1},
-     "Negatív kriptohír."),
-    ("kripto", rf"(bitcoin|crypto|btc).{{0,40}}({_FEL}|inflows?|approv\w*)", {"btc": 1},
-     "Pozitív kriptohír."),
+    ("kripto", r"(bitcoin|crypto|btc).{0,40}(outflows?|hack\w*|bans?|sues?|lawsuit)|\bsec\b.{0,40}(sues?|charges?|lawsuit)", {"btc": -1},
+     "Negatív kriptohír (kiáramlás, feltörés, tiltás vagy per)."),
+    ("kripto", r"(bitcoin|crypto|btc).{0,40}(inflows?|approv\w*)", {"btc": 1},
+     "Pozitív kriptohír (beáramlás vagy engedély)."),
 ]
+# Más jegybankok (angol, európai, japán stb.) kamathírei nem a Fedről szólnak: ezekre a kamatszabály nem ad irányt.
+NEM_FED = re.compile(r"\b(BoE|Bank of England|ECB|European Central Bank|BoJ|Bank of Japan|RBA|Reserve Bank of \w+|Bank of Canada"
+                     r"|BoC|SNB|Swiss National Bank|PBOC|People's Bank|RBI|Riksbank|Norges Bank)\b")
+FED = re.compile(r"\b(Fed|Federal Reserve|FOMC|Warsh|Powell|U\.S\.|US)\b")
 IRANY_SZABALYOK = [(cs, re.compile(m, re.IGNORECASE), h, mz) for cs, m, h, mz in IRANY_SZABALYOK]
 
 # Magyar nevek a gyakori naptári eseményekhez (részszöveg -> magyar név)
@@ -591,9 +615,9 @@ def rss_elemek(url, forras=None):
         }
 
 
-def google_hirek(kereses):
+def google_hirek(kereses, idoszak="1h"):
     url = ("https://news.google.com/rss/search?q="
-           + urllib.parse.quote(f"({kereses}) when:1h") + "&hl=en-US&gl=US&ceid=US:en")
+           + urllib.parse.quote(f"({kereses}) when:{idoszak}") + "&hl=en-US&gl=US&ceid=US:en")
     for h in rss_elemek(url):
         h["leiras"] = ""  # a Google-nál ez csak egy link
         yield h
@@ -650,6 +674,11 @@ def irany_becsles(szovegek):
             # ha a mondat béketárgyalásról szól, a benne szereplő „war” nem háborús eszkalációt jelent
             if csoport == "haboru" and "beke" in csoportok:
                 continue
+            if csoport == "kamat" and NEM_FED.search(szoveg) and not FED.search(szoveg):
+                continue
+            # a „beat/miss expectations” egy gazdasági adatnál (pl. foglalkoztatás) nem cégjelentés
+            if csoport == "jelentes" and "munka" in csoportok:
+                continue
             talalat = minta.search(szoveg)
             if not talalat:
                 continue
@@ -657,7 +686,7 @@ def irany_becsles(szovegek):
             kornyezet = szoveg[max(0, talalat.start() - 15): talalat.end() + 12]
             # ha a tagadó szó maga a találat része (pl. "temper rate-hike bets"), a szabály már számolt vele
             tagadott = TAGADAS.search(kornyezet) and not TAGADAS.search(talalat.group(0))
-            elojel = -1 if tagadott and csoport in ("kamat", "inflacio", "beke") else 1
+            elojel = -1 if tagadott and csoport in ("kamat", "inflacio", "beke", "haboru", "vam") else 1
             for eszkoz, ertek in hatas.items():
                 pont[eszkoz] += elojel * ertek * suly
                 abszolut[eszkoz] += abs(ertek) * suly
